@@ -1,0 +1,384 @@
+"""
+Genera 'interfaz_usuario.html': página minimalista para el usuario. Desplegable de aparato
+y, solo si el aparato se puede mover de hora, desplegable de franja. Muestra cuánto gastará.
+
+
+Datos de partida (los genera main.py en 'resultados/'):
+    resultados_MILP.csv, resultados_Baseline.csv, parametros_cargas.json
+
+Uso:
+    python generar_interfaz_usuario.py
+"""
+
+import json
+import os
+
+from plan_usuario import generar_plan
+
+CARPETA = "resultados"
+RUTA_MILP = os.path.join(CARPETA, "resultados_MILP.csv")
+RUTA_BASELINE = os.path.join(CARPETA, "resultados_Baseline.csv")
+RUTA_PARAMETROS = os.path.join(CARPETA, "parametros_cargas.json")
+RUTA_SALIDA = "interfaz_usuario.html"
+
+HORNO = {"potencia_kW": 2.0, "veces_semana": 3, "minutos": 60}          # horno típico
+# Tamaño de la vivienda -> potencia de luminarias típica (W) y consumo diario típico de la nevera (kWh).
+TAMANOS = {
+    "pequena": {"etq": "Pequeña (hasta unos 50 m²)", "luz_W": 100, "nevera_kwh_dia": 0.6},
+    "mediana": {"etq": "Mediana (de 50 a 90 m²)", "luz_W": 200, "nevera_kwh_dia": 1.0},
+    "grande": {"etq": "Grande (más de 90 m²)", "luz_W": 350, "nevera_kwh_dia": 1.5},
+}
+# Uso medio de la luz: equivale a tener TODAS las luminarias encendidas este nº de horas al día.
+LUZ_HORAS_EQUIVALENTES_DIA = 2.5
+
+# Reparto del uso de la luz a lo largo del día (peso relativo por hora, 0-23): se usa sobre todo
+# en las horas de poca luz (mañana temprano y de la tarde a la noche); poco de día.
+PERFIL_ILUMINACION = [3, 1, 1, 1, 1, 1, 2, 6, 3, 1, 1, 1, 1, 1, 1, 1, 1, 3, 8, 10, 12, 12, 10, 6]
+
+
+def _por_banda_clima(plan: dict, precios: dict) -> dict:
+    """Gasto semanal de la climatización por banda (histórico y con plan), a partir del plan."""
+    antes = {"P1": 0.0, "P2": 0.0, "P3": 0.0}
+    despues = {"P1": 0.0, "P2": 0.0, "P3": 0.0}
+    for d in plan["dias"]:
+        for p in antes:
+            antes[p] += d["climatizacion"]["kwh_antes"].get(p, 0.0)
+            despues[p] += d["climatizacion"]["kwh_despues"].get(p, 0.0)
+    return {
+        "antes_eur": {p: round(antes[p] * precios[p], 4) for p in antes},
+        "plan_eur": {p: round(despues[p] * precios[p], 4) for p in despues},
+    }
+
+
+def construir_datos() -> dict:
+    plan = generar_plan(RUTA_MILP, RUTA_BASELINE, RUTA_PARAMETROS)
+    if not plan.get("por_carga"):
+        raise SystemExit(f"Falta '{RUTA_PARAMETROS}': ejecuta antes main.py.")
+    precios = plan["precios_eur_kWh"]
+    pot = plan["parametros"]["potencias_nominales_kW"]
+    pc = plan["por_carga"]
+
+    aparatos = {}
+    for id_, etq in [("lavadora", "Lavadora"), ("lavavajillas", "Lavavajillas"), ("calentador_agua", "Calentador de agua")]:
+        aparatos[id_] = {
+            "etq": etq, "tipo": "datos_mueve", "potencia_kW": pot[id_],
+            "kwh_semana": pc[id_]["kwh_semana"], "horas_semana": round(pc[id_]["kwh_semana"] / pot[id_], 2),
+            "plan_ahorro_eur": pc[id_]["ahorro_eur"], "plan_ahorro_pct": pc[id_]["ahorro_pct"],
+        }
+    aparatos["climatizacion"] = {
+        "etq": "Climatización", "tipo": "datos_fijo", "kwh_semana": pc["climatizacion"]["kwh_semana"],
+        "semana_real_eur": pc["climatizacion"]["coste_historico"], "semana_plan_eur": pc["climatizacion"]["coste_recomendado"],
+        "plan_ahorro_eur": pc["climatizacion"]["ahorro_eur"], **_por_banda_clima(plan, precios),
+    }
+    aparatos["horno"] = {"etq": "Horno", "tipo": "horno", **HORNO}
+    aparatos["iluminacion"] = {"etq": "Iluminación", "tipo": "estimado", "perfil": PERFIL_ILUMINACION}
+    aparatos["nevera"] = {"etq": "Nevera", "tipo": "estimado", "perfil": [1] * 24}
+
+    return {"semana": plan["semana"], "precios": precios, "aparatos": aparatos,
+            "tamanos": TAMANOS, "luz_horas_dia": LUZ_HORAS_EQUIVALENTES_DIA}
+
+
+PLANTILLA = r"""<!DOCTYPE html>
+<html lang="es" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>¿Cuánto me cuesta?</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #F7F7F5; --text: #1A1F27; --muted: #6A7280; --linea: #E2E4E8; --campo: #FFFFFF;
+  --barata: #0F8F76; --normal: #C97A1B; --cara: #C4453C;
+  --font-display: 'Space Grotesk', sans-serif; --font-body: 'IBM Plex Sans', sans-serif;
+  box-sizing: border-box;
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #14181F; --text: #EDEFF3; --muted: #8A93A3; --linea: #2A3240; --campo: #1B212B;
+    --barata: #2DD4A7; --normal: #F5A623; --cara: #E8544E;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #14181F; --text: #EDEFF3; --muted: #8A93A3; --linea: #2A3240; --campo: #1B212B;
+  --barata: #2DD4A7; --normal: #F5A623; --cara: #E8544E;
+}
+html { scroll-padding-top: env(safe-area-inset-top, 0px); }
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }   /* sin esto, `display: grid` anula el atributo hidden y los campos del horno se verían en todos los aparatos */
+body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--font-body); line-height: 1.5; -webkit-font-smoothing: antialiased; }
+main { max-width: 520px; margin: 0 auto; padding: 3rem 1.4rem 3rem; }
+
+h1 { font-family: var(--font-display); font-size: 1.9rem; font-weight: 600; letter-spacing: -0.02em; margin: 0; }
+.sub { color: var(--muted); margin: 0.35rem 0 2.2rem; }
+
+.campo { margin-bottom: 1.1rem; }
+.campo label { display: block; font-size: 0.78rem; color: var(--muted); margin-bottom: 0.35rem; }
+select, input { width: 100%; font-family: var(--font-body); font-size: 1.05rem; padding: 0.8rem 0.9rem; color: var(--text);
+  background: var(--campo); border: 1px solid var(--linea); border-radius: 10px; cursor: pointer; }
+select:focus, input:focus { outline: none; border-color: var(--text); }
+input::placeholder { color: var(--muted); opacity: 0.7; }
+select:disabled { cursor: default; opacity: 1; color: var(--muted); background: transparent; -webkit-text-fill-color: var(--muted); }
+
+.detalle { min-height: 4.6rem; }          /* reserva el espacio: el contenido de abajo no salta al cambiar de aparato */
+.detalle p { color: var(--muted); font-size: 0.84rem; margin: 0.1rem 0 0; }
+.fila2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0.8rem; }
+
+.resultado { margin-top: 1.4rem; padding-top: 1.8rem; border-top: 1px solid var(--linea); }
+.pregunta { color: var(--muted); margin: 0; font-size: 0.95rem; }
+.importe { font-family: var(--font-display); font-size: 3.4rem; font-weight: 700; line-height: 1.1; margin: 0.2rem 0 0; letter-spacing: -0.02em; }
+.importe small { font-size: 1rem; font-weight: 500; color: var(--muted); letter-spacing: 0; }
+.linea2 { color: var(--muted); font-size: 0.9rem; margin: 0.25rem 0 0; }
+
+.titulo-barras { color: var(--muted); font-size: 0.78rem; margin: 1.6rem 0 0.6rem; }
+.barra { display: grid; grid-template-columns: 4.6rem 1fr 4rem; align-items: center; gap: 0.7rem; margin-bottom: 0.55rem; font-size: 0.86rem; color: var(--muted); }
+.barra .pista { height: 10px; background: var(--linea); border-radius: 99px; overflow: hidden; }
+.barra .relleno { display: block; height: 100%; border-radius: 99px; }
+.barra .valor { text-align: right; font-family: var(--font-display); font-weight: 600; }
+.barra.elegida { color: var(--text); }
+.barra.elegida .nombre { font-weight: 600; }
+
+.consejo { font-size: 0.95rem; margin: 1.1rem 0 0.5rem; }
+.consejo b { color: var(--barata); font-family: var(--font-display); }
+.nota { color: var(--muted); font-size: 0.82rem; margin: 0.3rem 0 0; }
+
+svg text { font-family: var(--font-body); fill: var(--muted); }
+.reloj { margin-top: 1.6rem; }
+
+footer { margin-top: 3rem; color: var(--muted); font-size: 0.74rem; line-height: 1.6; }
+</style>
+</head>
+<body>
+<main>
+  <h1>¿Cuánto me cuesta?</h1>
+  <p class="sub">Elige un aparato y cuándo lo usas.</p>
+
+  <div class="campo"><label for="aparato">Aparato</label><select id="aparato"></select></div>
+  <div class="campo"><label for="franja">¿Cuándo lo pones?</label><select id="franja"></select></div>
+
+  <div class="detalle">
+    <p id="detalle"></p>
+    <div class="fila2" id="fijo-campos" hidden>
+      <div class="campo"><label for="tamano">Tamaño de tu vivienda</label><select id="tamano"></select></div>
+      <div class="campo" id="campo-luz"><label for="luzW">Potencia de tus luminarias (W), opcional</label><input id="luzW" type="number" min="1" max="5000" step="10" placeholder="Si lo sabes"></div>
+    </div>
+    <div class="fila2" id="horno-campos" hidden>
+      <div class="campo"><label for="veces">Veces por semana</label><select id="veces"></select></div>
+      <div class="campo"><label for="minutos">Minutos cada vez</label><select id="minutos"></select></div>
+    </div>
+  </div>
+
+  <section class="resultado" aria-live="polite">
+    <p class="pregunta" id="pregunta"></p>
+    <p class="importe" id="importe"></p>
+    <p class="linea2" id="linea2"></p>
+    <p class="titulo-barras" id="titulo-barras"></p>
+    <div id="barras"></div>
+    <p class="consejo" id="consejo"></p>
+    <p class="nota" id="nota"></p>
+    <div class="reloj" id="reloj"></div>
+  </section>
+
+  <footer id="pie"></footer>
+</main>
+
+<script id="datos" type="application/json">__DATOS_JSON__</script>
+<script>
+const D = JSON.parse(document.getElementById('datos').textContent);
+const PRECIO = D.precios;                 // €/kWh por banda: P1 cara, P2 normal, P3 barata
+const APARATOS = D.aparatos;
+const BANDA = { P1: 'cara', P2: 'normal', P3: 'barata' };
+const COLOR = { P1: 'var(--cara)', P2: 'var(--normal)', P3: 'var(--barata)' };
+
+const FRANJAS = [
+  { id: 'madrugada', frase: 'de madrugada', etq: 'Madrugada · 00:00 a 08:00', per: 'P3', horas: [0, 8] },
+  { id: 'manana', frase: 'por la mañana', etq: 'Mañana · 08:00 a 10:00', per: 'P2', horas: [8, 10] },
+  { id: 'mediodia', frase: 'al mediodía', etq: 'Mediodía · 10:00 a 14:00', per: 'P1', horas: [10, 14] },
+  { id: 'tarde', frase: 'por la tarde', etq: 'Tarde · 14:00 a 18:00', per: 'P2', horas: [14, 18] },
+  { id: 'noche', frase: 'por la noche', etq: 'Noche · 18:00 a 22:00', per: 'P1', horas: [18, 22] },
+  { id: 'ultima', frase: 'a última hora', etq: 'Última hora · 22:00 a 24:00', per: 'P2', horas: [22, 24] },
+  { id: 'finde', frase: 'en fin de semana o festivo', etq: 'Fin de semana o festivo · todo el día', per: 'P3', horas: [0, 24] },
+];
+const HORA_BANDA = (() => {
+  const p = new Array(24).fill('P3');
+  [8, 9, 14, 15, 16, 17, 22, 23].forEach(h => p[h] = 'P2');
+  [10, 11, 12, 13, 18, 19, 20, 21].forEach(h => p[h] = 'P1');
+  return p;
+})();
+
+const eur = (v, d = 2) => v.toLocaleString('es-ES', { minimumFractionDigits: d, maximumFractionDigits: d }) + ' €';
+const num = (v, d = 1) => v.toLocaleString('es-ES', { minimumFractionDigits: d, maximumFractionDigits: d });
+const $ = (id) => document.getElementById(id);
+
+// ---------- Desplegables ----------
+const selAparato = $('aparato'), selFranja = $('franja');
+[['Con datos reales (vivienda del estudio)', ['lavadora', 'lavavajillas', 'calentador_agua', 'climatizacion']],
+ ['Estimaciones según tu vivienda', ['horno', 'iluminacion', 'nevera']]].forEach(([titulo, ids]) => {
+  const g = document.createElement('optgroup'); g.label = titulo;
+  ids.forEach(id => { const o = document.createElement('option'); o.value = id; o.textContent = APARATOS[id].etq; g.appendChild(o); });
+  selAparato.appendChild(g);
+});
+for (let v = 1; v <= 14; v++) { const o = document.createElement('option'); o.value = v; o.textContent = v; $('veces').appendChild(o); }
+[15, 30, 45, 60, 90, 120, 150, 180].forEach(m => { const o = document.createElement('option'); o.value = m; o.textContent = m + ' min'; $('minutos').appendChild(o); });
+Object.entries(D.tamanos).forEach(([k, v]) => { const o = document.createElement('option'); o.value = k; o.textContent = v.etq; $('tamano').appendChild(o); });
+$('tamano').value = 'mediana';
+$('veces').value = APARATOS.horno.veces_semana; $('minutos').value = APARATOS.horno.minutos;
+
+let franjaElegida = 'noche';
+const TEXTO_FIJO = { climatizacion: 'Depende de la temperatura', iluminacion: 'Sobre todo al anochecer', nevera: 'Las 24 horas' };
+
+function prepararFranja(id, mueve) {
+  if (mueve) {
+    if (selFranja.disabled || !selFranja.options.length || selFranja.dataset.fijo) {
+      selFranja.innerHTML = '';
+      FRANJAS.forEach(f => { const o = document.createElement('option'); o.value = f.id; o.textContent = `${f.etq} (${BANDA[f.per]})`; selFranja.appendChild(o); });
+      delete selFranja.dataset.fijo;
+    }
+    selFranja.disabled = false; selFranja.value = franjaElegida;
+  } else {
+    if (!selFranja.disabled) franjaElegida = selFranja.value;
+    selFranja.innerHTML = `<option>${TEXTO_FIJO[id]}</option>`; selFranja.disabled = true; selFranja.dataset.fijo = '1';
+  }
+}
+
+// ---------- Franja de 24 horas ----------
+function reloj(franja) {
+  const w = 20, alto = 22, todo = franja.id === 'finde';
+  let s = `<svg viewBox="0 0 ${24 * w} ${alto + 18}" width="100%" role="img" aria-label="Horas del día según el precio de la luz">`;
+  HORA_BANDA.forEach((p, h) => {
+    const dentro = todo || (h >= franja.horas[0] && h < franja.horas[1]);
+    s += `<rect x="${h * w}" y="1" width="${w - 1}" height="${alto}" rx="2" fill="${COLOR[todo ? 'P3' : p]}" fill-opacity="${dentro ? 1 : 0.22}"/>`;
+  });
+  [0, 6, 12, 18, 24].forEach(h => { s += `<text x="${h * w}" y="${alto + 14}" font-size="9.5" text-anchor="${h === 0 ? 'start' : h === 24 ? 'end' : 'middle'}">${String(h).padStart(2, '0')}h</text>`; });
+  return s + '</svg>';
+}
+
+function barras(titulo, costes, elegida) {
+  $('titulo-barras').textContent = titulo;
+  const maximo = Math.max(costes.P1, costes.P2, costes.P3);
+  $('barras').innerHTML = ['P3', 'P2', 'P1'].map(p =>
+    `<div class="barra${p === elegida ? ' elegida' : ''}"><span class="nombre">${BANDA[p][0].toUpperCase() + BANDA[p].slice(1)}</span>
+     <span class="pista"><span class="relleno" style="width:${maximo > 0 ? (100 * costes[p] / maximo).toFixed(1) : 0}%;background:${COLOR[p]}"></span></span>
+     <span class="valor">${eur(costes[p])}</span></div>`).join('');
+}
+
+// Gasto semanal por banda de un consumo repartido según un perfil horario (5 laborables + fin de semana todo barato)
+function repartoSemanal(kwhSemana, perfil) {
+  const total = perfil.reduce((s, x) => s + x, 0), dia = kwhSemana / 7;
+  const e = { P1: 0, P2: 0, P3: 2 * dia };
+  perfil.forEach((w, h) => { e[HORA_BANDA[h]] += 5 * dia * w / total; });
+  return { energia: e, coste: { P1: e.P1 * PRECIO.P1, P2: e.P2 * PRECIO.P2, P3: e.P3 * PRECIO.P3 } };
+}
+
+function limpiar() { ['pregunta', 'importe', 'linea2', 'titulo-barras', 'barras', 'consejo', 'nota', 'reloj'].forEach(k => $(k).innerHTML = ''); }
+
+// ---------- Aparatos que se pueden mover de franja ----------
+function vistaMovible(id, a) {
+  const franja = FRANJAS.find(f => f.id === selFranja.value) || FRANJAS.find(f => f.id === franjaElegida) || FRANJAS[0];
+  let kwh, pot, linea2Extra;
+  if (a.tipo === 'horno') {
+    const veces = parseInt($('veces').value), min = parseInt($('minutos').value);
+    pot = a.potencia_kW; kwh = pot * veces * min / 60;
+    $('detalle').textContent = '';
+    linea2Extra = `${eur(pot * min / 60 * PRECIO[franja.per])} cada vez que lo usas (${min} min).`;
+  } else {
+    pot = a.potencia_kW; kwh = a.kwh_semana;
+    $('detalle').textContent = `Datos reales de la vivienda del estudio: esta semana se usó ${num(a.horas_semana, 2)} horas.`;
+    linea2Extra = `${eur(pot * PRECIO[franja.per], 3)} por cada hora de uso.`;
+  }
+  const coste = kwh * PRECIO[franja.per], ahorro = coste - kwh * PRECIO.P3;
+  $('pregunta').textContent = `${a.etq} ${franja.frase}${franja.id === 'finde' ? '' : ' (hora ' + BANDA[franja.per] + ')'} gastará`;
+  $('importe').innerHTML = `${eur(coste)} <small>a la semana</small>`;
+  $('linea2').textContent = linea2Extra;
+  barras('Si lo pones en cada franja', { P1: kwh * PRECIO.P1, P2: kwh * PRECIO.P2, P3: kwh * PRECIO.P3 }, franja.per);
+  if (franja.per === 'P3') $('consejo').innerHTML = 'Es la franja <b>más barata</b>: no puedes pagar menos.';
+  else $('consejo').innerHTML = `En la franja barata (madrugada o fin de semana) ahorrarías <b>${eur(ahorro)}</b> a la semana (${num(100 * ahorro / coste, 0)} %).`;
+  $('nota').textContent = a.tipo === 'horno'
+    ? 'Estimación con la potencia típica de un horno (2 kW). Para el horno, lo realista es pasarlo a hora normal entre semana, o usarlo en fin de semana.'
+    : `Según el optimizador, lo mejor es la franja barata. Con ese plan, este aparato ahorra ${eur(a.plan_ahorro_eur)} a la semana (${num(a.plan_ahorro_pct, 0)} %).`;
+  $('reloj').innerHTML = reloj(franja);
+}
+
+// ---------- Aparatos que no se mueven ----------
+function vistaFija(id, a) {
+  $('reloj').innerHTML = '';
+  if (id === 'climatizacion') {
+    $('detalle').textContent = `Datos reales de la vivienda del estudio (semana del ${D.semana}).`;
+    $('pregunta').textContent = 'Esta semana el aire te ha costado';
+    $('importe').innerHTML = `${eur(a.semana_real_eur)} <small>a la semana</small>`;
+    $('linea2').textContent = `Con el plan del optimizador serían ${eur(a.semana_plan_eur)}: ahorras ${eur(a.plan_ahorro_eur)}.`;
+    barras('Dónde se gasta', a.antes_eur, null);
+    $('consejo').textContent = 'No se puede mover todo el aire a otra franja: depende de la temperatura. Lo que sí ahorra es evitar la hora cara.';
+    $('nota').textContent = 'Según el optimizador: reposo en las horas caras (10-14 h y 18-22 h) y en marcha en las normales (8-10, 14-18 y 22-24 h).';
+    return;
+  }
+  const T = D.tamanos[$('tamano').value];
+  const nombreTam = T.etq.split(' (')[0].toLowerCase();
+  let kwhSemana, potW, esPropia = false;
+  if (id === 'iluminacion') {
+    const w = parseFloat($('luzW').value);
+    esPropia = w > 0 && w <= 5000;
+    potW = esPropia ? w : T.luz_W;
+    kwhSemana = potW / 1000 * D.luz_horas_dia * 7;
+  } else {
+    kwhSemana = T.nevera_kwh_dia * 7;
+  }
+  const r = repartoSemanal(kwhSemana, a.perfil);
+  const total = r.coste.P1 + r.coste.P2 + r.coste.P3, energia = r.energia.P1 + r.energia.P2 + r.energia.P3;
+  $('detalle').textContent = id === 'iluminacion'
+    ? (esPropia ? `Con los ${num(potW, 0)} W de luminarias que indicas.` : `Estimación para una vivienda ${nombreTam}: unos ${num(potW, 0)} W de luminarias.`)
+    : `Estimación para una vivienda ${nombreTam}.`;
+  if (id === 'iluminacion') {
+    $('pregunta').textContent = esPropia ? 'La luz de tu vivienda cuesta' : 'La luz de una vivienda como la tuya cuesta';
+    $('linea2').textContent = `Se usa sobre todo al anochecer: el ${num(100 * r.energia.P1 / energia, 0)} % de la luz se gasta en hora cara.`;
+    $('consejo').textContent = 'No se puede mover: la luz se usa cuando oscurece. Aquí solo se ahorra gastando menos (bombillas LED, apagar las que no uses).';
+    $('nota').textContent = `Supuesto: es como tener todas las luminarias encendidas ${num(D.luz_horas_dia, 1)} horas al día, sobre todo de la tarde a la noche. Una bombilla LED suele tener unos 10 W.`;
+  } else {
+    $('pregunta').textContent = 'Una nevera como la tuya cuesta';
+    $('linea2').textContent = 'Funciona las 24 horas, todos los días.';
+    $('consejo').textContent = 'Funciona las 24 horas: no se puede mover de franja.';
+    $('nota').textContent = `Supuesto: unos ${num(T.nevera_kwh_dia, 1)} kWh al día, según el tamaño de la vivienda.`;
+  }
+  $('importe').innerHTML = `${eur(total)} <small>a la semana</small>`;
+  barras('Dónde se gasta', r.coste, null);
+}
+
+// ---------- Pintado ----------
+function pintar() {
+  const id = selAparato.value, a = APARATOS[id];
+  const mueve = a.tipo === 'datos_mueve' || a.tipo === 'horno';
+  prepararFranja(id, mueve);
+  $('horno-campos').hidden = a.tipo !== 'horno';
+  $('fijo-campos').hidden = a.tipo !== 'estimado';
+  $('campo-luz').hidden = id !== 'iluminacion';
+  if (mueve) vistaMovible(id, a); else vistaFija(id, a);
+}
+selAparato.addEventListener('change', pintar);
+selFranja.addEventListener('change', () => { if (!selFranja.disabled && FRANJAS.some(f => f.id === selFranja.value)) franjaElegida = selFranja.value; pintar(); });
+['veces', 'minutos', 'tamano'].forEach(k => $(k).addEventListener('change', pintar));
+$('luzW').addEventListener('input', pintar);
+selAparato.value = 'lavadora';
+pintar();
+
+$('pie').textContent =
+  `Tarifa 2.0TD: hora cara ${eur(PRECIO.P1, 3)}/kWh, normal ${eur(PRECIO.P2, 3)}/kWh y barata ${eur(PRECIO.P3, 3)}/kWh (valores representativos del mercado libre, sin impuestos ni término de potencia). ` +
+  `Fines de semana y festivos nacionales todo el día es barato. Lavadora, lavavajillas, calentador y aire usan el consumo real de la vivienda del estudio en la semana ${D.semana} (en una instalación real serían los de tu medidor); horno, iluminación y nevera son estimaciones.`;
+</script>
+</body>
+</html>
+"""
+
+
+def main():
+    datos = construir_datos()
+    html = PLANTILLA.replace("__DATOS_JSON__", json.dumps(datos, ensure_ascii=False))
+    with open(RUTA_SALIDA, "w", encoding="utf-8") as f:
+        f.write(html)
+    print(f"[OK] '{RUTA_SALIDA}' generado ({len(html)} caracteres).")
+
+
+if __name__ == "__main__":
+    main()
